@@ -1,0 +1,114 @@
+"""
+Execute: python3 rag.py
+"""
+
+import requests
+import numpy as np
+
+HF_TOKEN = "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"
+
+HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"}
+
+DOCUMENTOS = [
+    "Python é uma linguagem de programação criada por Guido van Rossum em 1991. "
+    "É famosa pela sintaxe simples e legível, e muito usada em ciência de dados e IA.",
+
+    "Machine Learning é um subcampo da Inteligência Artificial onde modelos aprendem "
+    "padrões a partir de dados, sem serem explicitamente programados para cada tarefa.",
+
+    "RAG (Retrieval-Augmented Generation) é uma técnica que combina busca em documentos "
+    "com geração de texto. Primeiro recupera trechos relevantes, depois usa um LLM para "
+    "gerar uma resposta baseada nesses trechos, reduzindo alucinações.",
+
+    "HuggingFace é uma plataforma com mais de 500 mil modelos de IA open-source. "
+    "Sua Inference API permite usar modelos via HTTP sem precisar de GPU própria.",
+
+    "Embeddings são vetores numéricos que representam texto. Textos com significado "
+    "parecido ficam próximos no espaço vetorial. Usamos similaridade de cosseno "
+    "para medir o quão similares dois textos são.",
+
+    "LLMs (Large Language Models) como GPT e Mistral são modelos com bilhões de parâmetros "
+    "treinados para prever texto. Podem gerar respostas incorretas (alucinações) "
+    "quando não têm informação suficiente.",
+]
+
+
+def gerar_embedding(texto):
+    url = "https://api-inference.huggingface.co/pipeline/feature-extraction/sentence-transformers/all-MiniLM-L6-v2"
+    resposta = requests.post(url, headers=HEADERS,
+                             json={"inputs": texto, "options": {"wait_for_model": True}})
+    resposta.raise_for_status()
+    vetor = np.array(resposta.json())
+    # Garante formato 1D (média se vier 2D)
+    if vetor.ndim == 2:
+        vetor = vetor.mean(axis=0)
+    return vetor
+
+
+def similaridade_cosseno(a, b):
+    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-10)
+
+
+def buscar_documentos(pergunta, top_k=2):
+    print("  Calculando embeddings dos documentos...")
+    emb_docs = [gerar_embedding(doc) for doc in DOCUMENTOS]
+
+    print("  Calculando embedding da pergunta...")
+    emb_pergunta = gerar_embedding(pergunta)
+
+    scores = [similaridade_cosseno(emb_pergunta, emb_doc) for emb_doc in emb_docs]
+    indices_top = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:top_k]
+
+    return [(DOCUMENTOS[i], scores[i]) for i in indices_top]
+
+
+def gerar_resposta(pergunta, documentos_recuperados):
+    contexto = "\n".join(f"- {doc}" for doc, _ in documentos_recuperados)
+
+    prompt = f"""<s>[INST] Responda à pergunta usando APENAS as informações abaixo.
+Se a resposta não estiver nas informações, diga que não sabe.
+
+INFORMAÇÕES:
+{contexto}
+
+PERGUNTA: {pergunta} [/INST]"""
+
+    url = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.3"
+    resposta = requests.post(url, headers=HEADERS, json={
+        "inputs": prompt,
+        "parameters": {"max_new_tokens": 200, "temperature": 0.3, "return_full_text": False},
+        "options": {"wait_for_model": True}
+    }, timeout=60)
+    resposta.raise_for_status()
+
+    resultado = resposta.json()
+    if isinstance(resultado, list):
+        return resultado[0].get("generated_text", "").strip()
+    return str(resultado)
+
+
+def perguntar(pergunta):
+    """Função principal: executa o pipeline RAG completo."""
+    print(f"\n{'='*55}")
+    print(f"Pergunta: {pergunta}")
+    print("="*55)
+
+    print("\n[1/2] Buscando documentos relevantes...")
+    docs = buscar_documentos(pergunta, top_k=2)
+    for doc, score in docs:
+        print(f"  ✓ Score {score:.2f} — {doc[:60]}...")
+
+    print("\n[2/2] Gerando resposta com IA...")
+    resposta = gerar_resposta(pergunta, docs)
+
+    print(f"\nResposta: {resposta}")
+    return resposta
+
+
+if __name__ == "__main__":
+    if "SEU_TOKEN" in HF_TOKEN:
+        print("⚠️  Configure seu HF_TOKEN no início do arquivo!")
+        print("   Obtenha em: https://huggingface.co/settings/tokens")
+    else:
+        perguntar("O que é RAG e por que ele reduz alucinações?")
+        perguntar("O que é HuggingFace?")
